@@ -1,21 +1,27 @@
-# Dataset setup (required before training)
 
-This directory is a template. It contains no real training images or labels.
+# BoneAI - AI Bone Fracture Detection
 
-Expected structure:
+A Flask-based web application project for AI-assisted bone fracture detection from X-ray images.
 
-- `images/train/` training images
-- `images/val/` validation images
-- `labels/train/` YOLO label text files matching training image basenames
-- `labels/val/` YOLO label text files matching validation image basenames
-- `data.yaml` dataset configuration
+## Features
 
-For every image, create a same-named `.txt` label file. Each non-empty line must use YOLO detection format:
+- Flask web application
+- Doctor and patient account functionality
+- X-ray upload interface
+- YOLO-based fracture detection integration
+- HTML templates and static assets
 
-`class_id x_center y_center width height`
+## Requirements
 
-Coordinates must be normalized to 0–1. Example only (not a real annotation):
+Install the Python dependencies listed in `requirements.txt`.
 
-`2 0.52 0.48 0.20 0.16`
+## Run locally
 
-The class IDs in labels must match `names` in `data.yaml`. Use medically appropriate, permissioned X-ray data and reliable expert annotations. Do not train on decorative/stock website graphics. Do not use this template as if it were a dataset.
+1. Set up your Python virtual environment.
+2. Install dependencies from `requirements.txt`.
+3. Configure the required model and environment settings.
+4. Run the Flask application using the project's setup instructions.
+
+## Important
+
+This is an educational project. AI predictions are not a substitute for assessment by a qualified medical professional.

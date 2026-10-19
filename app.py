@@ -1,13 +1,19 @@
 import os
+import io
+import json
 import sqlite3
+import tempfile
 import uuid
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
 
-from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, send_from_directory
+from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, send_from_directory, abort
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
+from dotenv import load_dotenv
+
+load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "instance" / "boneai.db"
@@ -18,7 +24,7 @@ ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
 MAX_CONTENT_LENGTH = 12 * 1024 * 1024
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = os.environ.get("BONEAI_SECRET_KEY", "change-this-secret-before-deployment")
+app.config["SECRET_KEY"] = os.environ.get("BONEAI_SECRET_KEY", "local-development-only-change-before-deployment")
 app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
 
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -27,6 +33,74 @@ DB_PATH.parent.mkdir(exist_ok=True)
 
 _model = None
 _model_error = None
+_supabase = None
+_supabase_error = None
+SIGNED_URL_SECONDS = 60
+
+
+def get_supabase():
+    """Create the Supabase client lazily using a server-side secret key."""
+    global _supabase, _supabase_error
+    if _supabase is not None:
+        return _supabase
+    if _supabase_error:
+        raise RuntimeError(_supabase_error)
+    url = os.getenv("SUPABASE_URL", "").strip()
+    key = os.getenv("SUPABASE_SECRET_KEY", "").strip()
+    if not url or not key:
+        raise RuntimeError("Set SUPABASE_URL and SUPABASE_SECRET_KEY in your .env file.")
+    try:
+        from supabase import create_client
+        _supabase = create_client(url, key)
+        return _supabase
+    except Exception as exc:
+        _supabase_error = f"Could not initialize Supabase: {exc}"
+        raise RuntimeError(_supabase_error)
+
+
+def storage_bucket():
+    return os.getenv("SUPABASE_BUCKET", "boneai-xrays").strip() or "boneai-xrays"
+
+
+def upload_private_xray(image_bytes, user_id, extension, content_type):
+    """Upload bytes to the private bucket under a server-generated object path."""
+    mime_types = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
+    extension = extension.lower()
+    expected = mime_types.get(extension)
+    if not expected or content_type != expected:
+        raise ValueError("Unsupported image format.")
+    if not image_bytes or len(image_bytes) > MAX_CONTENT_LENGTH:
+        raise ValueError("Image is empty or larger than 12 MB.")
+    object_path = f"user-{int(user_id)}/{uuid.uuid4().hex}{extension}"
+    get_supabase().storage.from_(storage_bucket()).upload(
+        path=object_path,
+        file=image_bytes,
+        file_options={"content-type": expected, "upsert": "false"},
+    )
+    return object_path
+
+
+def create_xray_signed_url(object_path):
+    """Create a short-lived URL for a private storage object."""
+    if not object_path or object_path.startswith(("http://", "https://")):
+        raise ValueError("Invalid private storage path.")
+    response = get_supabase().storage.from_(storage_bucket()).create_signed_url(
+        object_path, SIGNED_URL_SECONDS
+    )
+    if isinstance(response, dict):
+        url = response.get("signedURL") or response.get("signedUrl")
+        if url:
+            return url
+    raise RuntimeError("Supabase did not return a signed URL.")
+
+
+def scan_access_allowed(scan):
+    if not scan:
+        return False
+    if session.get("role") != "patient":
+        return True
+    return (scan["patient_code"] == session.get("username") or
+            scan["patient_user_id"] == session.get("user_id"))
 
 def db():
     conn = sqlite3.connect(DB_PATH)
@@ -98,7 +172,7 @@ def allowed_file(filename):
 @app.errorhandler(413)
 def too_large(_):
     flash("Image is too large. Maximum upload size is 12 MB.", "danger")
-    return redirect(url_for("detect"))
+    return redirect(url_for("detect")) if "user_id" in session else ("Image too large (12 MB maximum).", 413)
 
 @app.route("/")
 def home():
@@ -166,83 +240,107 @@ def dashboard():
 @app.route("/detect", methods=["GET", "POST"])
 @login_required
 def detect():
-    if session.get("role") == "patient" and request.method == "GET":
-        pass
     if request.method == "POST":
-        file = request.files.get("xray")
-        if not file or not file.filename:
+        uploaded = request.files.get("xray")
+        if not uploaded or not uploaded.filename:
             flash("Choose an X-ray image first.", "warning")
             return redirect(url_for("detect"))
-        if not allowed_file(file.filename):
+        if not allowed_file(uploaded.filename):
             flash("Supported formats: PNG, JPG, JPEG, WEBP.", "danger")
             return redirect(url_for("detect"))
-        original = secure_filename(file.filename)
-        stored_name = f"{uuid.uuid4().hex}_{original}"
-        image_path = UPLOAD_DIR / stored_name
-        file.save(image_path)
+
+        original = secure_filename(uploaded.filename)
+        extension = Path(original).suffix.lower()
+        mime_types = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
+        if extension not in mime_types:
+            flash("Unsupported image format.", "danger")
+            return redirect(url_for("detect"))
+
+        image_bytes = uploaded.read()
+        if not image_bytes or len(image_bytes) > MAX_CONTENT_LENGTH:
+            flash("Image is empty or larger than 12 MB.", "danger")
+            return redirect(url_for("detect"))
+        try:
+            from PIL import Image
+            with Image.open(io.BytesIO(image_bytes)) as im:
+                if im.format not in {"JPEG", "PNG", "WEBP"}:
+                    raise ValueError("Unsupported image contents")
+                im.verify()
+        except Exception:
+            flash("The uploaded file is not a valid JPG, PNG, or WEBP image.", "danger")
+            return redirect(url_for("detect"))
 
         patient_code = request.form.get("patient_code", "").strip()[:80]
         patient_name = request.form.get("patient_name", "").strip()[:120]
         if session.get("role") == "patient":
             patient_code = session.get("username", "")
             patient_name = patient_name or session.get("username", "")
-        scan_id = None
+
+        try:
+            storage_path = upload_private_xray(
+                image_bytes, session["user_id"], extension, mime_types[extension]
+            )
+        except Exception:
+            app.logger.exception("Private Supabase upload failed")
+            flash("Could not upload to private Supabase Storage. Check .env, bucket name, and Supabase key.", "danger")
+            return redirect(url_for("detect"))
+
         with db() as conn:
-            patient_user = conn.execute("SELECT id FROM users WHERE username=? AND role='patient'", (patient_code,)).fetchone() if patient_code else None
+            patient_user = conn.execute(
+                "SELECT id FROM users WHERE username=? AND role='patient'", (patient_code,)
+            ).fetchone() if patient_code else None
             cur = conn.execute(
                 """INSERT INTO scans(patient_user_id, patient_code, patient_name, image_name, status, uploaded_by, created_at)
                    VALUES(?,?,?,?,?,?,?)""",
                 (patient_user["id"] if patient_user else (session.get("user_id") if session.get("role") == "patient" else None),
-                 patient_code or None, patient_name or None, stored_name, "uploaded",
-                 session.get("user_id"), datetime.now().isoformat(timespec="seconds"))
+                 patient_code or None, patient_name or None, storage_path, "uploaded", session.get("user_id"),
+                 datetime.now().isoformat(timespec="seconds"))
             )
             scan_id = cur.lastrowid
 
+        temp_path = None
         try:
-            from PIL import Image
-            with Image.open(image_path) as im:
-                im.verify()
             model = get_model()
-            results = model.predict(source=str(image_path), verbose=False)
+            with tempfile.NamedTemporaryFile(suffix=extension, dir=UPLOAD_DIR, delete=False) as temp_file:
+                temp_path = Path(temp_file.name)
+                temp_file.write(image_bytes)
+            results = model.predict(source=str(temp_path), verbose=False)
             result = results[0]
             detections = []
             for box in result.boxes:
                 class_id = int(box.cls[0].item())
-                confidence = float(box.conf[0].item())
-                xyxy = [round(float(v), 2) for v in box.xyxy[0].tolist()]
-                detections.append({
-                    "class_name": str(result.names.get(class_id, class_id)),
-                    "confidence": round(confidence, 4),
-                    "bbox": xyxy
-                })
+                confidence_value = float(box.conf[0].item())
+                bbox = [round(float(v), 2) for v in box.xyxy[0].tolist()]
+                detections.append({"class_name": str(result.names.get(class_id, class_id)),
+                                   "confidence": round(confidence_value, 4), "bbox": bbox})
             if detections:
-                best = max(detections, key=lambda d: d["confidence"])
-                predicted_class = best["class_name"]
-                confidence = best["confidence"]
+                best = max(detections, key=lambda item: item["confidence"])
+                predicted_class, confidence_value = best["class_name"], best["confidence"]
             else:
-                predicted_class = "No objects detected"
-                confidence = None
-
+                predicted_class, confidence_value = "No objects detected", None
             result_name = f"scan_{scan_id}.jpg"
             plotted = result.plot()
-            from PIL import Image
             Image.fromarray(plotted[:, :, ::-1]).save(RESULT_DIR / result_name, quality=92)
-
-            import json
             with db() as conn:
                 conn.execute(
-                    """UPDATE scans SET result_image=?, predicted_class=?, confidence=?,
-                       detections_json=?, status='complete' WHERE id=?""",
-                    (result_name, predicted_class, confidence, json.dumps(detections), scan_id)
+                    """UPDATE scans SET result_image=?, predicted_class=?, confidence=?, detections_json=?, status='complete' WHERE id=?""",
+                    (result_name, predicted_class, confidence_value, json.dumps(detections), scan_id)
                 )
-            flash("Analysis finished. Treat the output as an AI prediction only.", "success")
-        except Exception as exc:
+            flash("Analysis finished. This is an AI prediction, not a diagnosis.", "success")
+        except Exception:
+            app.logger.exception("YOLO analysis failed")
             with db() as conn:
                 conn.execute("UPDATE scans SET status='error' WHERE id=?", (scan_id,))
-            flash(f"Analysis could not be completed: {exc}", "danger")
+            flash("The X-ray was stored, but analysis failed. Check models/best.pt and Python dependencies.", "danger")
+        finally:
+            if temp_path:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    app.logger.warning("Could not remove temporary X-ray file")
         return redirect(url_for("result", scan_id=scan_id))
-    model_ready = MODEL_PATH.is_file()
-    return render_template("detect.html", model_ready=model_ready, is_patient=session.get("role") == "patient")
+
+    return render_template("detect.html", model_ready=MODEL_PATH.is_file(), is_patient=session.get("role") == "patient")
 
 @app.route("/patients")
 @login_required
@@ -299,7 +397,7 @@ def result(scan_id):
     if not scan:
         flash("Scan not found.", "warning")
         return redirect(url_for("dashboard"))
-    if session.get("role") == "patient" and scan["patient_code"] != session.get("username") and scan["patient_user_id"] != session.get("user_id"):
+    if not scan_access_allowed(scan):
         flash("You can only view your own scan results.", "danger")
         return redirect(url_for("patient_dashboard"))
     try:
@@ -342,7 +440,7 @@ def report_pdf(scan_id):
     if not scan:
         flash("Scan not found.", "warning")
         return redirect(url_for("reports"))
-    if session.get("role") == "patient" and scan["patient_code"] != session.get("username") and scan["patient_user_id"] != session.get("user_id"):
+    if not scan_access_allowed(scan):
         flash("You can only download your own report.", "danger")
         return redirect(url_for("patient_history"))
     try:
@@ -381,11 +479,28 @@ def report_pdf(scan_id):
 @app.route("/uploads/<path:filename>")
 @login_required
 def uploaded_image(filename):
-    return send_from_directory(UPLOAD_DIR, filename)
+    # image_name stores the Supabase object path, not a local filename.
+    with db() as conn:
+        scan = conn.execute("SELECT * FROM scans WHERE image_name=?", (filename,)).fetchone()
+    if not scan:
+        abort(404)
+    if not scan_access_allowed(scan):
+        abort(403)
+    try:
+        return redirect(create_xray_signed_url(scan["image_name"]), code=302)
+    except Exception:
+        app.logger.exception("Could not create private Supabase signed URL")
+        abort(503)
 
 @app.route("/results/<path:filename>")
 @login_required
 def result_image(filename):
+    with db() as conn:
+        scan = conn.execute("SELECT * FROM scans WHERE result_image=?", (filename,)).fetchone()
+    if not scan:
+        abort(404)
+    if not scan_access_allowed(scan):
+        abort(403)
     return send_from_directory(RESULT_DIR, filename)
 
 @app.route("/assistant")
@@ -404,7 +519,11 @@ def settings():
 
 @app.route("/api/health")
 def health():
-    return jsonify({"status": "ok", "model_file_present": MODEL_PATH.is_file()})
+    return jsonify({"status": "ok", "model_file_present": MODEL_PATH.is_file(), "supabase_configured": bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SECRET_KEY"))})
+
+@app.errorhandler(403)
+def forbidden(_):
+    return "You do not have permission to access this file.", 403
 
 @app.errorhandler(404)
 def not_found(_):
@@ -413,5 +532,5 @@ def not_found(_):
 init_db()
 
 if __name__ == "__main__":
-    # Debug is convenient for local development only. Do not use debug=True in production.
+    # Local development only; use a production WSGI server when deployed.
     app.run(host="127.0.0.1", port=5000, debug=False)
