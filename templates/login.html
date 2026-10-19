@@ -1,0 +1,5 @@
+{% extends "base.html" %}{% block title %}Sign in | BoneAI{% endblock %}
+{% block content %}<section class="auth-wrap"><div class="auth-card"><div class="auth-logo">✚</div><div class="eyebrow">WELCOME BACK</div><h1>Sign in to BoneAI</h1><p class="muted">Access your scan workspace.</p>
+<form method="post" class="form-stack"><label>Username<input name="username" autocomplete="username" required placeholder="Enter username"></label><label>Password<input type="password" name="password" autocomplete="current-password" required placeholder="Enter password"></label><button class="btn primary full" type="submit">Sign in →</button></form>
+<p class="muted" style="margin-top:18px">New patient? <a class="text-link" href="{{ url_for('register_patient') }}">Create a patient account</a></p>
+</div></section>{% endblock %}

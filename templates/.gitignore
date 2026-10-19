@@ -1,0 +1,25 @@
+
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+
+.env
+.env.*
+!.env.example
+
+uploads/
+user_uploads/
+patient_uploads/
+dataset/
+results/
+
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Large AI model files
+*.pt
+*.pth
+*.onnx

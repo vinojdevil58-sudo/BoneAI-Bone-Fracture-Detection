@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+instance/
+uploads/*
+!uploads/.gitkeep
+results/*
+!results/.gitkeep
+runs/
+diagnostic_result.jpg

@@ -1,0 +1,15 @@
+# TEMPLATE ONLY: replace/add real labeled images and YOLO bounding-box labels.
+# Paths are relative to this YAML file's parent directory.
+path: .
+train: images/train
+val: images/val
+
+# Keep these names and IDs aligned with your annotation dataset and trained model.
+names:
+  0: elbow positive
+  1: fingers positive
+  2: forearm fracture
+  3: humerus fracture
+  4: humerus
+  5: shoulder fracture
+  6: wrist positive
