@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # BoneAI — simple homepage, no demo login, Windows setup and Android starter
 
 This ZIP contains the full Flask website project, YOLOv8 model files, patient/doctor pages, X-ray upload and prediction workflow, setup scripts, and a simplified responsive homepage. The homepage shows a single wrist X-ray image and has no analysis-result panel. It tries the online Wikimedia Commons X-ray first and falls back to the included local image if the online image cannot load.
@@ -19,3 +20,6 @@ Google Play health-app policy requires an active public privacy policy URL, a He
 
 ## Important security notes
 The included Flask website is a local development prototype. Do not expose it directly to the internet as-is. Production hosting requires secure deployment configuration, a strong secret key, HTTPS, secure session cookies, persistent storage, appropriate access controls, privacy/retention controls, and a security review. The model's accuracy has not been clinically validated.
+=======
+# BoneAI-Bone-Fracture-Detection
+>>>>>>> 2268874d40584c77b91bcae4194ef13aa91a4b08
