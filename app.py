@@ -286,15 +286,47 @@ def detect():
             return redirect(url_for("detect"))
 
         with db() as conn:
-            patient_user = conn.execute(
-                "SELECT id FROM users WHERE username=? AND role='patient'", (patient_code,)
-            ).fetchone() if patient_code else None
+            patient_user = None
+
+            if session.get("role") == "patient":
+                patient_user = conn.execute(
+                    "SELECT id FROM users WHERE username = ? AND role = 'patient'",
+                    (patient_code,)
+                ).fetchone()
+
+                # Do not insert a scan if the patient account is missing.
+                if not patient_user:
+                    app.logger.error(
+                        "Patient account not found for username: %s",
+                        patient_code
+                    )
+                    flash(
+                        "Patient account could not be found. Please log in again.",
+                        "danger"
+                    )
+                    return redirect(url_for("detect"))
+
+            patient_user_id = (
+                patient_user["id"] if patient_user else None
+            )
+
             cur = conn.execute(
-                """INSERT INTO scans(patient_user_id, patient_code, patient_name, image_name, status, uploaded_by, created_at)
-                   VALUES(?,?,?,?,?,?,?)""",
-                (patient_user["id"] if patient_user else (session.get("user_id") if session.get("role") == "patient" else None),
-                 patient_code or None, patient_name or None, storage_path, "uploaded", session.get("user_id"),
-                 datetime.now().isoformat(timespec="seconds"))
+                """
+                INSERT INTO scans(
+                    patient_user_id, patient_code, patient_name,
+                    image_name, status, uploaded_by, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    patient_user_id,
+                    patient_code or None,
+                    patient_name or None,
+                    storage_path,
+                    "uploaded",
+                    session.get("user_id"),
+                    datetime.now().isoformat(timespec="seconds")
+                )
             )
             scan_id = cur.lastrowid
 
