@@ -383,24 +383,37 @@ def detect():
 
     # Use the authenticated database ID directly for patient uploads.
     # This avoids searching by a form field that might contain an email or different value.
-    if session.get("role") == "patient":
-        with db() as conn:
-            patient_user = conn.execute(
-                "SELECT id, username FROM users WHERE id = ? AND role = 'patient'",
-                (session.get("user_id"),),
-            ).fetchone()
+    
+if session.get("role") == "patient":
+    with db() as conn:
+        # First verify the patient using the logged-in username.
+        patient_user = conn.execute(
+            """
+            SELECT id, username
+            FROM users
+            WHERE username = ? AND role = 'patient'
+            """,
+            (session.get("username"),),
+        ).fetchone()
 
-        if not patient_user:
-            app.logger.error(
-                "Patient account not found for user ID: %s", session.get("user_id")
-            )
-            session.clear()
-            flash("Patient account not found. Please sign in again.", "danger")
-            return redirect(url_for("login"))
+    if not patient_user:
+        app.logger.error(
+            "Patient account not found for username: %s",
+            session.get("username"),
+        )
+        session.clear()
+        flash(
+            "Patient account not found. Please register or sign in again.",
+            "danger",
+        )
+        return redirect(url_for("login"))
 
-        patient_user_id = patient_user["id"]
-        patient_code = patient_user["username"]
-        patient_name = patient_name or patient_user["username"]
+    # Synchronize the session with the verified database account.
+    patient_user_id = patient_user["id"]
+    session["user_id"] = patient_user_id
+    patient_code = patient_user["username"]
+    patient_name = patient_name or patient_user["username"]
+
 
     # Upload to private storage only after the session's patient identity is checked.
     try:
